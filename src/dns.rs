@@ -83,6 +83,7 @@ impl Dns {
         let (addrs, ttl) = self.inner_resolve(hostname.clone()).await?;
         if !addrs.is_empty() {
             let expiry = Instant::now() + Duration::from_secs(ttl as u64);
+            log::debug!("Caching {hostname} for {ttl}s");
             self.cache.insert(hostname, (addrs.clone(), expiry));
         }
         Ok(addrs)

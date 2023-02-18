@@ -136,15 +136,14 @@ impl<R: Resolver> SocksListener<R> {
         };
 
         let addr_bytes = addr_type.read_addr_bytes(&mut self.tcp_stream).await?;
+        let ip_addr = addr_type
+            .decode(addr_bytes, |host| self.resolver.resolve(host))
+            .await?;
         let port = u8s_to_u16(
             self.tcp_stream.read_u8().await?,
             self.tcp_stream.read_u8().await?,
         );
-        debug!("Socks {socks}, Command: {command}, AddrType: {addr_type:?}");
-
-        let ip_addr = addr_type
-            .decode(addr_bytes, |host| self.resolver.resolve(host))
-            .await?;
+        debug!("Socks {socks}, Command: {command}, AddrType: {addr_type:?}={ip_addr:?}");
 
         Ok(SocketAddr::new(ip_addr, port))
     }
