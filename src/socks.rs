@@ -4,26 +4,26 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::Resolver;
 use log::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 
+use crate::dns::Dns;
 use crate::util::u8s_to_u16;
 
-pub struct Socks5<R: Resolver> {
+pub struct Socks5 {
     tcp_listener: TcpListener,
     timeout: Duration,
-    resolver: Arc<R>,
+    resolver: Arc<Dns>,
 }
 
-impl<R: Resolver + Sync + 'static> Socks5<R> {
-    pub async fn default(port: u16, resolver: R) -> io::Result<Self> {
-        Self::new(port, Duration::from_millis(100), Arc::new(resolver)).await
+impl Socks5 {
+    pub async fn default(port: u16) -> io::Result<Self> {
+        Self::new(port, Duration::from_millis(100), Arc::new(Dns::new())).await
     }
 
-    pub async fn new(port: u16, timeout: Duration, resolver: Arc<R>) -> io::Result<Self> {
+    pub async fn new(port: u16, timeout: Duration, resolver: Arc<Dns>) -> io::Result<Self> {
         let tcp_listener = TcpListener::bind(("127.0.0.1", port)).await?;
         info!("Successfully bound to port {port}");
         Ok(Socks5 {
@@ -57,13 +57,13 @@ const SOCKS_VERSION: u8 = 0x05;
 const SOCKS_CONNECT: u8 = 0x01;
 const NO_AUTH: u8 = 0x00;
 
-struct SocksListener<R: Resolver> {
+struct SocksListener {
     tcp_stream: TcpStream,
     timeout: Duration,
-    resolver: Arc<R>,
+    resolver: Arc<Dns>,
 }
 
-impl<R: Resolver> SocksListener<R> {
+impl SocksListener {
     async fn handle_client(&mut self) -> io::Result<()> {
         self.handshake().await?;
 
@@ -137,7 +137,9 @@ impl<R: Resolver> SocksListener<R> {
 
         let addr_bytes = addr_type.read_addr_bytes(&mut self.tcp_stream).await?;
         let ip_addr = addr_type
-            .decode(addr_bytes, |host| self.resolver.resolve(host))
+            .decode(addr_bytes, |host| async {
+                Ok(self.resolver.resolve(host).await?)
+            })
             .await?;
         let port = u8s_to_u16(
             self.tcp_stream.read_u8().await?,
@@ -192,11 +194,10 @@ impl AddrType {
         Ok(addr)
     }
 
-    async fn decode<F: Future<Output = io::Result<Vec<IpAddr>>>>(
-        self,
-        addr: Vec<u8>,
-        resolver: impl Fn(String) -> F,
-    ) -> io::Result<IpAddr> {
+    async fn decode<F>(self, addr: Vec<u8>, resolver: impl Fn(String) -> F) -> io::Result<IpAddr>
+    where
+        F: Future<Output = io::Result<Vec<IpAddr>>>,
+    {
         let socket_addr = match self {
             AddrType::V4 => {
                 assert_eq!(addr.len(), 4);
