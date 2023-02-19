@@ -1,2 +1,2 @@
 # VpnProxy
-A wireguard forwards via Socks5 proxy
+A userspace wireguard client, uses Socks5 proxy to accept forward the incoming network.
