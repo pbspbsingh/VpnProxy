@@ -1,8 +1,8 @@
-use dashmap::DashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use reqwest::{header, Client, Response};
 use serde::Deserialize;
 use tokio::time::Instant;

@@ -2,34 +2,39 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
 use log::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Instant;
 
 use crate::dns::Dns;
 use crate::util::u8s_to_u16;
+use crate::wg::virtual_socket::{VSocketReader, VSocketWriter};
+use crate::wg::WireGuard;
 
 pub struct Socks5 {
     tcp_listener: TcpListener,
-    timeout: Duration,
     resolver: Arc<Dns>,
+    wg: Arc<WireGuard>,
 }
 
 impl Socks5 {
     pub async fn default(port: u16) -> io::Result<Self> {
-        Self::new(port, Duration::from_millis(100), Arc::new(Dns::new())).await
+        Self::new(port, Dns::new()).await
     }
 
-    pub async fn new(port: u16, timeout: Duration, resolver: Arc<Dns>) -> io::Result<Self> {
+    pub async fn new(port: u16, resolver: Dns) -> io::Result<Self> {
         let tcp_listener = TcpListener::bind(("127.0.0.1", port)).await?;
+        let resolver = Arc::new(resolver);
+        let wg = WireGuard::init().await?;
         info!("Successfully bound to port {port}");
+
         Ok(Socks5 {
             tcp_listener,
-            timeout,
             resolver,
+            wg,
         })
     }
 
@@ -38,8 +43,8 @@ impl Socks5 {
             debug!("Accepted connection from {addr}");
             let mut listener = SocksListener {
                 tcp_stream,
-                timeout: self.timeout,
                 resolver: self.resolver.clone(),
+                wg: self.wg.clone(),
             };
             tokio::spawn(async move {
                 if let Err(e) = listener.handle_client().await {
@@ -59,8 +64,8 @@ const NO_AUTH: u8 = 0x00;
 
 struct SocksListener {
     tcp_stream: TcpStream,
-    timeout: Duration,
     resolver: Arc<Dns>,
+    wg: Arc<WireGuard>,
 }
 
 impl SocksListener {
@@ -81,9 +86,13 @@ impl SocksListener {
         let res_header = [SOCKS_VERSION, status as u8, 0, 1, 0, 0, 0, 0, 0, 0];
         self.tcp_stream.write_all(&res_header).await?;
 
-        let mut tcp_stream =
-            tokio::time::timeout(self.timeout, TcpStream::connect(socket_addr?)).await??;
-        tokio::io::copy_bidirectional(&mut self.tcp_stream, &mut tcp_stream).await?;
+        let mut virtual_socket = self.wg.connect(socket_addr?).await?;
+
+        let (read, write) = self.tcp_stream.split();
+        let (vreader, vwriter) = virtual_socket.split()?;
+        let (read, wrote) =
+            tokio::try_join!(read_stream(read, vwriter), write_stream(write, vreader))?;
+        info!("Total bytes read: {read}, written: {wrote}");
 
         Ok(())
     }
@@ -238,4 +247,57 @@ impl AddrType {
         };
         Ok(socket_addr)
     }
+}
+
+async fn read_stream(mut reader: ReadHalf<'_>, mut writer: VSocketWriter<'_>) -> io::Result<usize> {
+    let mut buff = vec![0; 8 * 1024];
+    let mut total = 0;
+    'outer: loop {
+        let len = reader.read(&mut buff).await?;
+        if len == 0 {
+            break 'outer;
+        }
+        total += len;
+
+        let mut start = 0;
+        loop {
+            let wlen = writer.write(&buff[start..len]).await?;
+            if wlen == 0 {
+                break 'outer;
+            }
+            start += wlen;
+            if start == len {
+                break;
+            }
+        }
+    }
+    Ok(total)
+}
+
+async fn write_stream(
+    mut writer: WriteHalf<'_>,
+    mut reader: VSocketReader<'_>,
+) -> io::Result<usize> {
+    let mut buff = vec![0; 8 * 1024];
+    let mut total = 0;
+    'outer: loop {
+        let len = reader.read(&mut buff).await?;
+        if len == 0 {
+            break 'outer;
+        }
+        total += len;
+
+        let mut start = 0;
+        loop {
+            let wlen = writer.write(&buff[start..len]).await?;
+            if wlen == 0 {
+                break 'outer;
+            }
+            start += wlen;
+            if start == len {
+                break;
+            }
+        }
+    }
+    Ok(total)
 }
