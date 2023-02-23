@@ -1,7 +1,9 @@
 use std::io::{Error, ErrorKind, Write};
 
 use smoltcp::iface::SocketHandle;
-use tokio::sync::mpsc::{Receiver, UnboundedSender};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::Receiver;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::wg::port_pool::LocalPort;
@@ -93,7 +95,7 @@ impl<'a> VSocketReader<'a> {
             }
         }
 
-        while let Some(_) = self.read_ready.recv().await {
+        while let Ok(_) | Err(RecvError::Lagged(_)) = self.read_ready.recv().await {
             let (tx, rx) = oneshot::channel();
             self.socket
                 .command_tx
@@ -135,7 +137,7 @@ impl<'a> VSocketWriter<'a> {
     }
 
     pub async fn write(&mut self, data: &[u8]) -> Result<usize, Error> {
-        while let Some(_) = self.write_ready.recv().await {
+        while let Ok(_) | Err(RecvError::Lagged(_)) = self.write_ready.recv().await {
             let mut write_buf = self.write_buf.take().unwrap_or_else(Vec::new);
             write_buf.clear();
             write_buf.extend_from_slice(data);

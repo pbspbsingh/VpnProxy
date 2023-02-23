@@ -266,7 +266,7 @@ impl WireGuard {
             match tunn_result {
                 TunnResult::Done => {
                     trace!("Routing task is done");
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 TunnResult::Err(WireGuardError::ConnectionExpired) => {
                     debug!("boringtun connection has expired");

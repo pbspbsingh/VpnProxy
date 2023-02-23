@@ -1,11 +1,11 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use log::*;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp::{ConnectError, Socket, SocketBuffer, State};
 use smoltcp::time::Instant;
-use tokio::sync::mpsc::{channel, unbounded_channel, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::broadcast;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
 use crate::util::parse_cidr;
@@ -83,18 +83,16 @@ async fn run_command(
 ) {
     info!("Starting background task to receive interface commands");
     let port_pool = LocalPortPool::default();
-    let mut notifier = HashMap::<u16, (Sender<()>, Sender<()>)>::new();
+
     let mut socket_set = SocketSet::new(Vec::new());
+    let (data_ready_tx, _) = broadcast::channel::<()>(1);
     while let Some(command) = rx.recv().await {
         match command {
             InterfaceCommand::PollSockets => {
                 trace!("Polling interface to check if data is received/transmitted");
                 if interface.poll(Instant::now(), &mut device, &mut socket_set) {
                     debug!("Polling interface received/transmitted data");
-                    notifier.values_mut().for_each(|(tx1, tx2)| {
-                        tx1.try_send(()).ok();
-                        tx2.try_send(()).ok();
-                    });
+                    data_ready_tx.send(()).ok();
                 }
             }
             InterfaceCommand::CreateTcpSocket(socket_addr, result_tx) => {
@@ -110,11 +108,13 @@ async fn run_command(
                             socket.local_endpoint()
                         );
                         let handle = socket_set.add(socket);
-                        let (signal_tx1, signal_rx1) = channel::<()>(1);
-                        let (signal_tx2, signal_rx2) = channel::<()>(1);
-                        notifier.insert(port.port(), (signal_tx1, signal_tx2));
-                        let virtual_socket =
-                            VirtualSocket::new(handle, port, signal_rx1, signal_rx2, tx.clone());
+                        let virtual_socket = VirtualSocket::new(
+                            handle,
+                            port,
+                            data_ready_tx.subscribe(),
+                            data_ready_tx.subscribe(),
+                            tx.clone(),
+                        );
 
                         if let Ok(_) = result_tx.send(Ok(virtual_socket)) {
                             tx.send(InterfaceCommand::PollSockets).ok();
@@ -199,7 +199,6 @@ async fn run_command(
                     socket.local_endpoint()
                 );
                 socket.close();
-                notifier.remove(&local_port.port());
                 drop(local_port);
             }
         };
