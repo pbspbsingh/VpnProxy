@@ -134,32 +134,36 @@ async fn run_command(
             }
             InterfaceCommand::ReadFromTcpSocket(handle, mut buff, result_tx) => {
                 let socket = socket_set.get_mut::<Socket>(handle);
-                debug!(
-                    "Trying to read {} bytes from tcp socket",
-                    socket.recv_queue(),
-                );
-                buff.clear();
-                buff.resize(socket.recv_queue(), 0);
-                match socket.recv_slice(&mut buff) {
-                    Ok(len) => {
-                        debug!("Successfully read {len} bytes from tcp socket");
-                        buff.truncate(len);
-                        if let Ok(_) = result_tx.send((buff, Ok(len))) {
-                            tx.send(InterfaceCommand::PollSockets).ok();
+                if socket.recv_queue() > 0 {
+                    debug!(
+                        "Trying to read {} bytes from tcp socket",
+                        socket.recv_queue(),
+                    );
+                    buff.clear();
+                    buff.resize(socket.recv_queue(), 0);
+                    match socket.recv_slice(&mut buff) {
+                        Ok(len) => {
+                            debug!("Successfully read {len} bytes from tcp socket");
+                            buff.truncate(len);
+                            if let Ok(_) = result_tx.send((buff, Ok(len))) {
+                                tx.send(InterfaceCommand::PollSockets).ok();
+                            }
+                        }
+                        Err(e) => {
+                            let res = if CLOSED_STATES.contains(&socket.state()) {
+                                warn!(
+                                    "Reading data from tcp socket failed: {e:?}, current state: {}",
+                                    socket.state()
+                                );
+                                Err(())
+                            } else {
+                                Ok(0)
+                            };
+                            result_tx.send((buff, res)).ok();
                         }
                     }
-                    Err(e) => {
-                        let res = if CLOSED_STATES.contains(&socket.state()) {
-                            warn!(
-                                "Reading data from tcp socket failed: {e:?}, current state: {}",
-                                socket.state()
-                            );
-                            Err(())
-                        } else {
-                            Ok(0)
-                        };
-                        result_tx.send((buff, res)).ok();
-                    }
+                } else {
+                    result_tx.send((buff, Ok(0))).ok();
                 }
             }
             InterfaceCommand::WriteOnTcpSocket(handle, buff, result_tx) => {

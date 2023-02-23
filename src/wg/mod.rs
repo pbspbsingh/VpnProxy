@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::{Tunn, TunnResult};
+use futures_util::future::BoxFuture;
+use futures_util::FutureExt;
 use log::*;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -91,6 +94,13 @@ impl WireGuard {
         {
             let wg = wg.clone();
             tokio::spawn(async move {
+                info!("Starting background task for boringtun routine task.");
+                wg.tunnel_routine_task().await;
+            });
+        }
+        {
+            let wg = wg.clone();
+            tokio::spawn(async move {
                 info!("Starting background task to transmit ip packets.");
                 wg.transmit_packet(transmit_rx).await;
             });
@@ -102,6 +112,7 @@ impl WireGuard {
                 wg.receive_packets(receiving_tx).await;
             });
         }
+
         info!(
             "Initialization of WireGuard is done in {}ms",
             start.elapsed().as_millis()
@@ -240,5 +251,39 @@ impl WireGuard {
                 }
             }
         }
+    }
+
+    async fn tunnel_routine_task(&self) {
+        let mut buff = vec![0u8; MAX_PACKET_SIZE];
+        while self.is_alive() {
+            let tunn_result = self.tunn.update_timers(&mut buff);
+            self.handle_tun_result(tunn_result).await;
+        }
+    }
+
+    fn handle_tun_result<'a>(&'a self, tunn_result: TunnResult<'a>) -> BoxFuture<'a, ()> {
+        async move {
+            match tunn_result {
+                TunnResult::Done => {
+                    trace!("Routing task is done");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                TunnResult::Err(WireGuardError::ConnectionExpired) => {
+                    debug!("boringtun connection has expired");
+                    let mut buff = vec![0u8; MAX_PACKET_SIZE];
+                    let result = self.tunn.format_handshake_initiation(&mut buff, false);
+                    self.handle_tun_result(result).await;
+                }
+                TunnResult::WriteToNetwork(packet) => {
+                    if let Err(e) = self.wg_peer_socket.send(packet).await {
+                        warn!("Sending UPD packet failed: {e}");
+                    }
+                }
+                other => {
+                    warn!("Unexpected routine task result: {other:?}");
+                }
+            };
+        }
+        .boxed()
     }
 }
